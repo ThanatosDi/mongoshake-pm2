@@ -1,5 +1,7 @@
 # mongoshake-pm2
 
+繁體中文 | [English](README.en.md)
+
 [MongoShake](https://github.com/alibaba/MongoShake) collector + [pm2](https://pm2.keymetrics.io/) 的多架構 container image（`linux/amd64`、`linux/arm64`）。
 一個 container 內用 pm2 同時跑多個 collector process，一個 conf 檔對應一個 process。
 
