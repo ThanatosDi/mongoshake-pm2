@@ -53,7 +53,9 @@ LABEL org.opencontainers.image.title="mongoshake-pm2" \
       org.opencontainers.image.source="https://github.com/alibaba/MongoShake" \
       org.opencontainers.image.version="${MONGOSHAKE_TAG}"
 
+# upgrade：套用 base image 發布後的 Debian 安全更新（如 perl-base CVE）
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends ca-certificates gettext-base \
  && rm -rf /var/lib/apt/lists/*
 
