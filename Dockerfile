@@ -68,17 +68,17 @@ RUN npm install -g "pm2@${PM2_VERSION}" \
 WORKDIR /opt/mongoshake
 COPY --from=builder /out/collector /opt/mongoshake/collector
 COPY --from=builder /out/collector.conf.default /opt/mongoshake/collector.conf.default
-COPY ecosystem.config.js /opt/mongoshake/ecosystem.config.js
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /opt/mongoshake/collector \
- && mkdir -p /opt/mongoshake/conf.tpl /opt/mongoshake/conf /opt/mongoshake/logs
+ && mkdir -p /opt/mongoshake/conf.tpl /opt/mongoshake/conf /opt/mongoshake/pm2 /opt/mongoshake/logs
 
-# conf.tpl：放 *.conf 模板，一個檔 = 一個 collector process
+# conf.tpl：放 *.conf 模板（啟動時 envsubst 後輸出到 conf/）
+# pm2     ：放 ecosystem.config.js，由使用者掛載，決定要跑哪些 collector
 # logs    ：pm2 與 collector 的 log
-VOLUME ["/opt/mongoshake/conf.tpl", "/opt/mongoshake/logs"]
+VOLUME ["/opt/mongoshake/conf.tpl", "/opt/mongoshake/pm2", "/opt/mongoshake/logs"]
 
 # 不 EXPOSE：port 由 conf.tpl 的 incr_sync / full_sync / prom http_port 決定，
 # 對外由 docker compose 的 ports 設定。
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["pm2-runtime", "start", "/opt/mongoshake/ecosystem.config.js"]
+CMD ["pm2-runtime", "start", "/opt/mongoshake/pm2/ecosystem.config.js"]

@@ -1,9 +1,11 @@
 // pm2 管理 MongoShake collector。
-// collector.linux 是 Go binary，interpreter 設 'none' 讓 pm2 直接 exec。
+// 掛載到 container 的 /opt/mongoshake/pm2/ecosystem.config.js。
+// conf 讀 /opt/mongoshake/conf/（entrypoint 由 conf.tpl/ envsubst 產生）。
+// collector 是 Go binary，interpreter 設 'none' 讓 pm2 直接 exec。
 const mk = (name, conf) => ({
   name,
   script: '/opt/mongoshake/collector',
-  args: ['-conf=/opt/mongoshake/conf.tpl/' + conf, '-verbose=0'],
+  args: ['-conf=/opt/mongoshake/conf/' + conf, '-verbose=0'],
   interpreter: 'none',
   cwd: '/opt/mongoshake',
   exec_mode: 'fork',

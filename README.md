@@ -7,14 +7,27 @@
 
 ## 使用
 
-```bash
-cd examples
-cp .env.example .env          # 填連線字串
-docker compose up -d
-docker exec mongoshake pm2 ls
+```yaml
+services:
+  mongoshake:
+    image: ghcr.io/<owner>/mongoshake-pm2:2.8.8
+    env_file: .env                                  # conf 模板內 ${VAR} 的值
+    volumes:
+      - ./pm2:/opt/mongoshake/pm2:ro                # ecosystem.config.js
+      - ./conf.tpl:/opt/mongoshake/conf.tpl:ro      # *.conf 模板
+      - ./logs:/opt/mongoshake/logs
+    ports:
+      - "9100:9100"                                 # 依 conf 內的 http_port 對應
 ```
 
-- 把 `*.conf` 放進 `conf.tpl/`，每個檔案會啟動一個 pm2 app，名稱為 `shake-<檔名>`。
+```bash
+cp ecosystem.config.js.example pm2/ecosystem.config.js   # 依 conf 檔調整 apps
+docker compose up -d
+docker compose exec mongoshake pm2 ls
+```
+
+- image 不內建 `ecosystem.config.js`，必須掛載到 `/opt/mongoshake/pm2/`，沒有的話 container 啟動即失敗。要跑哪些 collector、各自的 pm2 參數都在這個檔案決定，範例見 `ecosystem.config.js.example`。
+- `ecosystem.config.js` 內 collector 的 `-conf` 請指向 `/opt/mongoshake/conf/<檔名>`（渲染後的檔案），不要指向 `conf.tpl/`。
 - 啟動時 `entrypoint.sh` 會把 `conf.tpl/*.conf` 內的 `${VAR}` 用環境變數替換後輸出到 `/opt/mongoshake/conf/`；未定義的變數保留原樣。
 - 多個 instance 時，`id`、`checkpoint.storage.db`、`incr_sync.http_port` / `full_sync.http_port` / `prom.http_port`、`log.file` 都必須互不相同。
 - image 不宣告 `EXPOSE`，需要對外的 port（如 `prom.http_port`）請在 docker compose 的 `ports` 自行對應 conf 內的設定。
@@ -23,8 +36,6 @@ docker exec mongoshake pm2 ls
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `SHAKE_INSTANCES` | 空（全部） | 只啟動指定的 conf，填檔名不含 `.conf`，逗號分隔 |
-| `SHAKE_VERBOSE` | `0` | collector `-verbose` 等級 |
 | `SHAKE_TPL_DIR` | `/opt/mongoshake/conf.tpl` | conf 模板目錄 |
 | `SHAKE_CONF_DIR` | `/opt/mongoshake/conf` | 渲染後 conf 目錄 |
 
@@ -32,6 +43,7 @@ docker exec mongoshake pm2 ls
 
 | 路徑 | 說明 |
 |---|---|
+| `/opt/mongoshake/pm2` | `ecosystem.config.js`（必要） |
 | `/opt/mongoshake/conf.tpl` | conf 模板 |
 | `/opt/mongoshake/logs` | collector 與 pm2 log（pm2-logrotate：100M、保留 7 份、壓縮） |
 
