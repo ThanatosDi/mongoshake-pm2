@@ -1,0 +1,219 @@
+# 建置 MongoShake + pm2 多架構 image（linux/amd64、linux/arm64），
+# 推到 Docker Hub 與 GitHub Container Registry。
+#
+# 流程：prep → build（amd64 / arm64 各自在原生 runner 建置，push by digest）
+#       → merge（imagetools 合併成 manifest list 並上 tag）。全程不走 QEMU。
+#
+# 需要的設定（Settings > Secrets and variables > Actions）：
+#   Variables: DOCKERHUB_USERNAME   Docker Hub 帳號（也當 image namespace）
+#   Secrets:   DOCKERHUB_TOKEN      Docker Hub Access Token（Read & Write）
+#   GHCR 用內建 GITHUB_TOKEN，不需額外設定。
+#
+# 產出：
+#   docker.io/<DOCKERHUB_USERNAME>/mongoshake-pm2:<tags>
+#   ghcr.io/<owner>/mongoshake-pm2:<tags>
+# tags：MongoShake 版號（2.8.8）、完整 release tag、latest（default branch）、sha-xxxxxxx
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "examples/**"]
+  pull_request:
+    paths-ignore: ["**.md", "examples/**"]
+  workflow_dispatch:
+    inputs:
+      mongoshake_tag:
+        description: MongoShake git tag（見 https://github.com/alibaba/MongoShake/tags）
+        required: false
+        default: release-v2.8.8-20260428
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: mongoshake-pm2
+  DEFAULT_MONGOSHAKE_TAG: release-v2.8.8-20260428
+
+jobs:
+  prep:
+    runs-on: ubuntu-24.04
+    outputs:
+      mongoshake_tag: ${{ steps.prep.outputs.mongoshake_tag }}
+      mongoshake_version: ${{ steps.prep.outputs.mongoshake_version }}
+      images: ${{ steps.prep.outputs.images }}
+      ghcr_image: ${{ steps.prep.outputs.ghcr_image }}
+    steps:
+      - name: Resolve image names and version
+        id: prep
+        env:
+          INPUT_TAG: ${{ inputs.mongoshake_tag }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        run: |
+          ms_tag="${INPUT_TAG:-$DEFAULT_MONGOSHAKE_TAG}"
+          # release-v2.8.8-20260428 -> 2.8.8
+          ms_version=$(echo "$ms_tag" | sed -E 's/^release-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          # registry 的 image 名稱必須小寫
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          ghcr="ghcr.io/$owner/$IMAGE_NAME"
+          images="$ghcr"
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            images="$images,docker.io/$(echo "$DOCKERHUB_USERNAME" | tr '[:upper:]' '[:lower:]')/$IMAGE_NAME"
+          fi
+          {
+            echo "mongoshake_tag=$ms_tag"
+            echo "mongoshake_version=$ms_version"
+            echo "ghcr_image=$ghcr"
+            echo "images=$images"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prep
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare
+        run: echo "PLATFORM_PAIR=${MATRIX_PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.prep.outputs.images }}
+          labels: |
+            org.opencontainers.image.title=mongoshake-pm2
+            org.opencontainers.image.version=${{ needs.prep.outputs.mongoshake_tag }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: env.PUSH == 'true' && vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # push：只推 digest（不上 tag），由 merge job 合併
+      # PR  ：load 進本機做 smoke test
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            MONGOSHAKE_TAG=${{ needs.prep.outputs.mongoshake_tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: ${{ env.PUSH == 'true' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', needs.prep.outputs.images) || 'type=docker,name=smoke:local' }}
+          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,scope=build-${{ env.PLATFORM_PAIR }},mode=max
+          provenance: ${{ env.PUSH == 'true' }}
+          sbom: ${{ env.PUSH == 'true' }}
+
+      - name: Smoke test
+        env:
+          IMAGE: ${{ env.PUSH == 'true' && format('{0}@{1}', needs.prep.outputs.ghcr_image, steps.build.outputs.digest) || 'smoke:local' }}
+        run: |
+          docker run --rm --entrypoint sh "$IMAGE" \
+            -c 'uname -m && /opt/mongoshake/collector -version && pm2 -v'
+
+      - name: Export digest
+        if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prep, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.prep.outputs.images }}
+          tags: |
+            type=raw,value=${{ needs.prep.outputs.mongoshake_version }},enable={{is_default_branch}}
+            type=raw,value=${{ needs.prep.outputs.mongoshake_tag }},enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 兩個 registry 都已有相同 digest，從 GHCR 取來源，-t 同時上兩邊的 tag
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          GHCR_IMAGE: ${{ needs.prep.outputs.ghcr_image }}
+        run: |
+          # shellcheck disable=SC2046  # 需要 word splitting 展開多個 -t 與 digest
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$GHCR_IMAGE@sha256:%s " *)
+
+      - name: Inspect
+        env:
+          GHCR_IMAGE: ${{ needs.prep.outputs.ghcr_image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$GHCR_IMAGE:$VERSION"
