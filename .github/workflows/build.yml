@@ -82,6 +82,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write   # 上傳 Trivy SARIF 到 code scanning
     env:
       PUSH: ${{ github.event_name != 'pull_request' }}
     steps:
@@ -141,6 +142,54 @@ jobs:
         run: |
           docker run --rm --entrypoint sh "$IMAGE" \
             -c 'uname -m && /opt/mongoshake/collector -version && pm2 -v'
+
+      # Trivy 掃描：只回報不擋 build（上游 Go 依賴有已知漏洞，擋了每次都會失敗）。
+      # trivy-action 以 commit SHA 固定版本，避免 tag 被改寫的供應鏈風險。
+      - name: Trivy scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          image-ref: ${{ env.PUSH == 'true' && format('{0}@{1}', needs.prep.outputs.ghcr_image, steps.build.outputs.digest) || 'smoke:local' }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+
+      - name: Trivy scan (summary)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          image-ref: ${{ env.PUSH == 'true' && format('{0}@{1}', needs.prep.outputs.ghcr_image, steps.build.outputs.digest) || 'smoke:local' }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: trivy-results.txt
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Write Trivy summary
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          {
+            echo "## Trivy（$PLATFORM，HIGH / CRITICAL，已有修正版本）"
+            echo '```'
+            cat trivy-results.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # fork 來的 PR 拿不到 security-events: write，跳過上傳
+      - name: Upload Trivy results to code scanning
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-${{ env.PLATFORM_PAIR }}
 
       - name: Export digest
         if: env.PUSH == 'true'
